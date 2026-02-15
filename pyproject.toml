@@ -1,10 +1,10 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "aip-engine"
-version = "0.3.0"
+version = "0.3.2"
 description = "Algebraic Independence Processor — auto-detection of matrix structure + memory-efficient computation for ultra-large sparse systems"
 readme = "README.md"
 license = {text = "MIT"}
@@ -42,3 +42,4 @@ Issues = "https://github.com/iafiscal1212/aip-engine/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["aip", "aip.*"]
