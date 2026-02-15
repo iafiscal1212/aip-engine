@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "aip-engine"
+version = "0.3.0"
+description = "Algebraic Independence Processor — auto-detection of matrix structure + memory-efficient computation for ultra-large sparse systems"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Carmen Esteban"},
+]
+keywords = [
+    "sparse-matrix", "linear-algebra", "memory-efficient",
+    "combinatorial-number-system", "accordion-memory",
+    "large-scale-computation", "scientific-computing",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "numpy>=1.20",
+    "scipy>=1.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/iafiscal1212/aip-engine"
+Repository = "https://github.com/iafiscal1212/aip-engine"
+Issues = "https://github.com/iafiscal1212/aip-engine/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
