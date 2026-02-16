@@ -5,15 +5,8 @@ Computes the index of any k-subset of {0, 1, ..., n-1} in O(k) time
 using a precomputed Pascal table. Replaces dictionaries that would
 consume gigabytes of RAM for large problems.
 
-Theory:
-  The Combinatorial Number System maps each k-subset {c0, c1, ..., ck}
-  (sorted) to a unique integer. Combined with degree offsets, this gives
-  a global index for each monomial without storing any mapping.
-
-Performance:
-  - Pascal table: ~0 MB (e.g., 32x10 = 2.5 KB for 30 vars, degree 8)
-  - Dictionary for same problem: ~2 GB (8.6M entries with Python overhead)
-  - Index computation: O(k) per monomial, where k = degree
+v0.4.0: Added batch_combo_to_index() with cumulative Pascal sums
+for eliminating the inner j-loop in _lex_rank.
 
 Author: Carmen Esteban
 """
@@ -56,6 +49,20 @@ class PascalIndex:
             offset += int(self.pascal[num_vars, d])
         self._total = offset
 
+        # Precompute cumulative Pascal sums for fast _lex_rank
+        # _cum_pascal[k][j] = sum of pascal[n-1-i, k] for i=0..j-1
+        # Used to replace inner j-loop with a single lookup
+        self._cum_pascal = {}
+        for remaining in range(max_degree + 1):
+            cum = np.zeros(num_vars + 1, dtype=np.int64)
+            for j in range(num_vars):
+                available = num_vars - 1 - j
+                if available >= remaining >= 0:
+                    cum[j + 1] = cum[j] + int(self.pascal[available, remaining])
+                else:
+                    cum[j + 1] = cum[j]
+            self._cum_pascal[remaining] = cum
+
     @staticmethod
     def _build_pascal(n_max, k_max):
         """Precompute Pascal's triangle C(n, k)."""
@@ -94,26 +101,47 @@ class PascalIndex:
         return offset + rank
 
     def _lex_rank(self, combo):
-        """Lexicographic rank of a sorted combination among C(n, k)."""
+        """Lexicographic rank using precomputed cumulative Pascal sums."""
         k = len(combo)
         if k == 0:
             return 0
-        n = self.num_vars
         rank = 0
         prev = -1
         for i, a in enumerate(combo):
-            for j in range(prev + 1, a):
-                remaining = k - 1 - i
-                available = n - 1 - j
-                if available >= remaining and remaining >= 0:
-                    rank += int(self.pascal[available, remaining])
+            remaining = k - 1 - i
+            cum = self._cum_pascal[remaining]
+            # Sum pascal[available, remaining] for j in [prev+1, a)
+            # = cum[a] - cum[prev+1]
+            rank += int(cum[a] - cum[prev + 1])
             prev = a
         return rank
 
+    def batch_combo_to_index(self, combos):
+        """
+        Convert multiple combos to indices at once.
+
+        Parameters
+        ----------
+        combos : list of tuple
+            List of sorted variable index tuples.
+
+        Returns
+        -------
+        numpy.ndarray of int64
+            Array of global indices.
+        """
+        result = np.empty(len(combos), dtype=np.int64)
+        for i, combo in enumerate(combos):
+            result[i] = self.combo_to_index(combo)
+        return result
+
     def memory_bytes(self):
-        """Memory used by Pascal table."""
-        return self.pascal.nbytes
+        """Memory used by Pascal table + cumulative sums."""
+        total = self.pascal.nbytes
+        for cum in self._cum_pascal.values():
+            total += cum.nbytes
+        return total
 
     def __repr__(self):
         return (f"PascalIndex(vars={self.num_vars}, deg={self.max_degree}, "
-                f"monomials={self._total:,}, pascal={self.pascal.nbytes} bytes)")
+                f"monomials={self._total:,}, mem={self.memory_bytes()} bytes)")

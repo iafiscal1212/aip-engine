@@ -5,6 +5,8 @@ Instead of assembling a full sparse matrix, uses a LinearOperator
 that performs matvec/rmatvec by iterating over CSR column-chunks.
 This allows solving systems with billions of unknowns.
 
+v0.4.0: Added diagonal (Jacobi) preconditioning and float32 support.
+
 Author: Carmen Esteban
 """
 
@@ -47,7 +49,19 @@ def accordion_info(chunks):
     }
 
 
-def solve_chunks(chunks, b, max_iter=5000, tol=1e-10, verbose=True):
+def _compute_col_norms(chunks):
+    """Compute column norms across chunks for diagonal preconditioning."""
+    norms = []
+    for chunk in chunks:
+        # For each column, compute sum of squares
+        col_sq = chunk.multiply(chunk)  # element-wise square
+        col_norms = np.sqrt(np.asarray(col_sq.sum(axis=0)).ravel())
+        norms.append(col_norms)
+    return np.concatenate(norms)
+
+
+def solve_chunks(chunks, b, max_iter=5000, tol=1e-10, verbose=True,
+                 precondition=True, dtype=None):
     """
     Solve Ax = b where A is represented as column chunks.
 
@@ -66,6 +80,12 @@ def solve_chunks(chunks, b, max_iter=5000, tol=1e-10, verbose=True):
         Convergence tolerance (atol and btol).
     verbose : bool
         Print progress and results.
+    precondition : bool
+        Apply diagonal (Jacobi) preconditioning. Reduces iterations
+        significantly for ill-conditioned systems. Default True.
+    dtype : numpy dtype, optional
+        Force float32 or float64 for internal vectors. If None, uses
+        the dtype of the first chunk.
 
     Returns
     -------
@@ -78,44 +98,83 @@ def solve_chunks(chunks, b, max_iter=5000, tol=1e-10, verbose=True):
     m = chunks[0].shape[0]
     n = sum(c.shape[1] for c in chunks)
 
+    # Determine dtype
+    if dtype is None:
+        dtype = chunks[0].dtype
+    use_dtype = np.dtype(dtype)
+
     if verbose:
         info = accordion_info(chunks)
-        print(f"  [Accordion] Solve {m:,} x {n:,} in {len(chunks)} chunks")
+        dtype_name = 'f32' if use_dtype == np.float32 else 'f64'
+        print(f"  [Accordion] Solve {m:,} x {n:,} in {len(chunks)} chunks ({dtype_name})")
         print(f"  [Accordion] RAM: {info['ram_mb']} MB "
               f"(dense: {info['dense_would_be_mb']} MB, "
               f"compression: {info['compression']}x)")
-        print(f"  [Accordion] LSQR max_iter={max_iter}...")
         sys.stdout.flush()
 
+    # Diagonal preconditioning
+    diag_inv = None
+    if precondition:
+        t_pre = time.time()
+        col_norms = _compute_col_norms(chunks)
+        # Avoid division by zero
+        col_norms[col_norms < 1e-15] = 1.0
+        diag_inv = (1.0 / col_norms).astype(use_dtype)
+        if verbose:
+            print(f"  [Accordion] Preconditioner computed [{time.time() - t_pre:.1f}s]")
+            sys.stdout.flush()
+
     def matvec(x):
-        result = np.zeros(m)
+        x_work = x.astype(use_dtype) if x.dtype != use_dtype else x
+        if diag_inv is not None:
+            x_work = x_work * diag_inv
+        result = np.zeros(m, dtype=use_dtype)
         offset = 0
         for chunk in chunks:
             cols = chunk.shape[1]
-            result += chunk @ x[offset:offset + cols]
+            result += chunk @ x_work[offset:offset + cols]
             offset += cols
-        return result
+        return result.astype(np.float64)  # LSQR needs float64
 
     def rmatvec(y):
-        result = np.zeros(n)
+        y_work = y.astype(use_dtype) if y.dtype != use_dtype else y
+        result = np.zeros(n, dtype=use_dtype)
         offset = 0
         for chunk in chunks:
             cols = chunk.shape[1]
-            result[offset:offset + cols] = chunk.T @ y
+            result[offset:offset + cols] = chunk.T @ y_work
             offset += cols
-        return result
+        if diag_inv is not None:
+            result *= diag_inv
+        return result.astype(np.float64)  # LSQR needs float64
 
-    op = LinearOperator((m, n), matvec=matvec, rmatvec=rmatvec)
+    op = LinearOperator((m, n), matvec=matvec, rmatvec=rmatvec, dtype=np.float64)
+
+    if verbose:
+        print(f"  [Accordion] LSQR max_iter={max_iter}, precond={'ON' if precondition else 'OFF'}...")
+        sys.stdout.flush()
 
     t0 = time.time()
-    result = lsqr(op, b, atol=tol, btol=tol, iter_lim=max_iter)
-    x = result[0]
+    result = lsqr(op, b.astype(np.float64), atol=tol, btol=tol, iter_lim=max_iter)
+    x_raw = result[0]
     elapsed = time.time() - t0
 
-    # Compute residual
-    Ax = matvec(x)
+    # Undo preconditioning to get real x
+    if diag_inv is not None:
+        x = (x_raw * diag_inv.astype(np.float64))
+    else:
+        x = x_raw
+
+    # Compute residual (always in float64 for accuracy)
+    offset = 0
+    Ax = np.zeros(m, dtype=np.float64)
+    for chunk in chunks:
+        cols = chunk.shape[1]
+        Ax += chunk @ x[offset:offset + cols]
+        offset += cols
     residual = float(np.linalg.norm(Ax - b))
     del Ax
+
     size_l2 = int(np.sum(np.abs(x) > 1e-8))
     feasible = residual < 1e-6
 
