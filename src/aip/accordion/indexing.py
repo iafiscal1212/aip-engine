@@ -5,18 +5,21 @@ Computes the index of any k-subset of {0, 1, ..., n-1} in O(k) time
 using a precomputed Pascal table. Replaces dictionaries that would
 consume gigabytes of RAM for large problems.
 
-v0.4.0: Added batch_combo_to_index() with cumulative Pascal sums
-for eliminating the inner j-loop in _lex_rank.
+v0.4.0: Cumulative Pascal sums + Numba JIT acceleration.
 
 Author: Carmen Esteban
 """
 
 import numpy as np
+from aip.accordion import fast as _fast
 
 
 class PascalIndex:
     """
     Mathematical monomial indexing via Combinatorial Number System.
+
+    Automatically uses Numba JIT if available (50-100x faster).
+    Falls back to pure Python otherwise.
 
     Parameters
     ----------
@@ -42,16 +45,17 @@ class PascalIndex:
         self.pascal = self._build_pascal(num_vars + 1, max_degree + 1)
 
         # Precompute degree offsets
-        self._offsets = []
+        self._offsets_list = []
         offset = 0
         for d in range(max_degree + 1):
-            self._offsets.append(offset)
+            self._offsets_list.append(offset)
             offset += int(self.pascal[num_vars, d])
         self._total = offset
 
-        # Precompute cumulative Pascal sums for fast _lex_rank
-        # _cum_pascal[k][j] = sum of pascal[n-1-i, k] for i=0..j-1
-        # Used to replace inner j-loop with a single lookup
+        # Numpy version for numba kernels
+        self._offsets_np = np.array(self._offsets_list, dtype=np.int64)
+
+        # Precompute cumulative Pascal sums for pure-Python fast path
         self._cum_pascal = {}
         for remaining in range(max_degree + 1):
             cum = np.zeros(num_vars + 1, dtype=np.int64)
@@ -62,6 +66,11 @@ class PascalIndex:
                 else:
                     cum[j + 1] = cum[j]
             self._cum_pascal[remaining] = cum
+
+        # Warm up Numba JIT if available
+        self._use_numba = _fast.is_available()
+        if self._use_numba:
+            _fast.warmup(self.pascal, self.num_vars, self._offsets_np)
 
     @staticmethod
     def _build_pascal(n_max, k_max):
@@ -81,6 +90,8 @@ class PascalIndex:
         """
         Convert a sorted tuple of variable indices to a global monomial index.
 
+        Uses Numba JIT if available, pure Python otherwise.
+
         Parameters
         ----------
         combo : tuple of int
@@ -96,7 +107,12 @@ class PascalIndex:
         if d > self.max_degree:
             raise ValueError(f"Degree {d} exceeds max_degree {self.max_degree}")
 
-        offset = self._offsets[d]
+        if self._use_numba:
+            combo_arr = np.array(combo, dtype=np.int64)
+            return int(_fast.combo_to_index_jit(
+                combo_arr, self.pascal, self.num_vars, self._offsets_np))
+
+        offset = self._offsets_list[d]
         rank = self._lex_rank(combo)
         return offset + rank
 
@@ -110,8 +126,6 @@ class PascalIndex:
         for i, a in enumerate(combo):
             remaining = k - 1 - i
             cum = self._cum_pascal[remaining]
-            # Sum pascal[available, remaining] for j in [prev+1, a)
-            # = cum[a] - cum[prev+1]
             rank += int(cum[a] - cum[prev + 1])
             prev = a
         return rank
@@ -119,6 +133,8 @@ class PascalIndex:
     def batch_combo_to_index(self, combos):
         """
         Convert multiple combos to indices at once.
+
+        Uses Numba JIT batch kernel if available (fastest path).
 
         Parameters
         ----------
@@ -130,18 +146,42 @@ class PascalIndex:
         numpy.ndarray of int64
             Array of global indices.
         """
+        if not combos:
+            return np.empty(0, dtype=np.int64)
+
+        if self._use_numba:
+            flat, starts, lengths = _fast.pack_combos(combos)
+            return _fast.batch_combo_to_index_jit(
+                flat, starts, lengths,
+                self.pascal, self.num_vars, self._offsets_np)
+
         result = np.empty(len(combos), dtype=np.int64)
         for i, combo in enumerate(combos):
             result[i] = self.combo_to_index(combo)
         return result
 
+    def pack_for_numba(self):
+        """Return arrays needed for direct numba kernel calls.
+
+        Returns
+        -------
+        dict with pascal, num_vars, offsets, max_degree
+        """
+        return {
+            'pascal': self.pascal,
+            'num_vars': self.num_vars,
+            'offsets': self._offsets_np,
+            'max_degree': self.max_degree,
+        }
+
     def memory_bytes(self):
         """Memory used by Pascal table + cumulative sums."""
-        total = self.pascal.nbytes
+        total = self.pascal.nbytes + self._offsets_np.nbytes
         for cum in self._cum_pascal.values():
             total += cum.nbytes
         return total
 
     def __repr__(self):
+        accel = "numba" if self._use_numba else "python"
         return (f"PascalIndex(vars={self.num_vars}, deg={self.max_degree}, "
-                f"monomials={self._total:,}, mem={self.memory_bytes()} bytes)")
+                f"monomials={self._total:,}, backend={accel})")

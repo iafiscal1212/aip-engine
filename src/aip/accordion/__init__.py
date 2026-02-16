@@ -7,6 +7,8 @@ terabytes of RAM by:
   2. Building sparse matrices in batches (never all in RAM at once)
   3. Solving with streaming LinearOperator over column chunks
 
+v0.4.0: Numba JIT acceleration, float32, preconditioner, parallel build.
+
 Example:
     from aip.accordion import PascalIndex, AccordionBuilder, solve_chunks
 
@@ -14,20 +16,24 @@ Example:
     index = PascalIndex(num_vars=30, max_degree=10)
     idx = index.combo_to_index((3, 7, 12))  # O(k) time, 0 extra memory
 
-    # Batch construction
-    builder = AccordionBuilder(num_rows=53_000_000)
+    # Batch construction (float32 = half memory)
+    builder = AccordionBuilder(num_rows=53_000_000, dtype='float32')
     for batch_rows, batch_cols, batch_vals in my_batches():
         builder.add_batch(batch_rows, batch_cols, batch_vals)
     chunks = builder.finalize()
 
-    # Streaming solve (never assembles full matrix)
-    result = solve_chunks(chunks, b)
+    # Streaming solve with preconditioner
+    result = solve_chunks(chunks, b, precondition=True)
 
 Author: Carmen Esteban
 """
 
+from aip.accordion import fast
 from aip.accordion.indexing import PascalIndex
 from aip.accordion.builder import AccordionBuilder
 from aip.accordion.solver import solve_chunks, accordion_info
 
-__all__ = ["PascalIndex", "AccordionBuilder", "solve_chunks", "accordion_info"]
+__all__ = [
+    "PascalIndex", "AccordionBuilder", "solve_chunks", "accordion_info",
+    "fast",
+]

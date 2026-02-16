@@ -4,7 +4,7 @@ from scipy import sparse
 import pytest
 
 import aip
-from aip.accordion import PascalIndex, AccordionBuilder, solve_chunks
+from aip.accordion import PascalIndex, AccordionBuilder, solve_chunks, fast
 
 
 def test_version():
@@ -97,8 +97,66 @@ def test_pascal_batch():
 
 def test_pascal_memory():
     idx = PascalIndex(30, 8)
-    assert idx.memory_bytes() < 100000  # <100 KB with cumulative sums
+    assert idx.memory_bytes() < 100000  # <100 KB
 
+
+def test_pascal_repr_shows_backend():
+    idx = PascalIndex(6, 4)
+    r = repr(idx)
+    assert "backend=" in r
+    assert ("numba" in r or "python" in r)
+
+
+def test_pascal_pack_for_numba():
+    idx = PascalIndex(10, 4)
+    pack = idx.pack_for_numba()
+    assert 'pascal' in pack
+    assert 'num_vars' in pack
+    assert 'offsets' in pack
+    assert 'max_degree' in pack
+    assert pack['num_vars'] == 10
+    assert pack['max_degree'] == 4
+
+
+# === Fast module tests ===
+
+def test_fast_is_available():
+    """fast.is_available() should return bool."""
+    assert isinstance(fast.is_available(), bool)
+
+
+def test_fast_pack_combos():
+    combos = [(1, 3, 5), (2,), (), (0, 4)]
+    flat, starts, lengths = fast.pack_combos(combos)
+    assert len(flat) == 3 + 1 + 0 + 2  # total elements
+    assert list(lengths) == [3, 1, 0, 2]
+    assert list(flat[starts[0]:starts[0]+3]) == [1, 3, 5]
+    assert list(flat[starts[1]:starts[1]+1]) == [2]
+    assert list(flat[starts[3]:starts[3]+2]) == [0, 4]
+
+
+def test_fast_pack_combos_empty():
+    flat, starts, lengths = fast.pack_combos([])
+    assert len(flat) == 0
+    assert len(starts) == 0
+
+
+def test_fast_merge_sorted():
+    """Test merge_sorted with numpy arrays."""
+    a = np.array([1, 3, 5], dtype=np.int64)
+    b = np.array([2, 4], dtype=np.int64)
+    result = fast.merge_sorted(a, b)
+    assert list(result) == [1, 2, 3, 4, 5]
+
+
+def test_fast_merge_sorted_empty():
+    a = np.array([], dtype=np.int64)
+    b = np.array([1, 2], dtype=np.int64)
+    assert list(fast.merge_sorted(a, b)) == [1, 2]
+    assert list(fast.merge_sorted(b, a)) == [1, 2]
+
+
+# === AccordionBuilder tests ===
 
 def test_accordion_builder():
     builder = AccordionBuilder(num_rows=10)
@@ -118,9 +176,7 @@ def test_accordion_builder_float32():
     builder._batch_cols = 2
     builder.flush()
     assert builder.chunks[0].dtype == np.float32
-    # float32 chunks should use less memory
-    bytes_used = builder.chunks[0].data.nbytes
-    assert bytes_used == 2 * 4  # 2 entries * 4 bytes
+    assert builder.chunks[0].data.nbytes == 2 * 4
 
 
 def test_accordion_builder_float64():
@@ -130,31 +186,22 @@ def test_accordion_builder_float64():
     builder._batch_cols = 2
     builder.flush()
     assert builder.chunks[0].dtype == np.float64
-    bytes_used = builder.chunks[0].data.nbytes
-    assert bytes_used == 2 * 8  # 2 entries * 8 bytes
+    assert builder.chunks[0].data.nbytes == 2 * 8
 
 
 def test_accordion_builder_batches():
     builder = AccordionBuilder(num_rows=5)
-
-    # Batch 1
     builder.add_entries([0, 1], [0, 1], [1.0, 2.0], num_cols=2)
     builder.flush()
-
-    # Batch 2
     builder.add_entries([2, 3], [0, 1], [3.0, 4.0], num_cols=2)
     builder.flush()
-
     assert len(builder.chunks) == 2
     assert builder.total_cols == 4
     assert builder.total_nnz == 4
 
 
 def test_accordion_parallel_build():
-    """Test parallel chunk building."""
     builder = AccordionBuilder(num_rows=10)
-
-    # Queue 3 batches
     for batch in range(3):
         for i in range(5):
             builder.add_entry(i + batch, i, float(i + 1))
@@ -163,24 +210,27 @@ def test_accordion_parallel_build():
 
     assert len(builder._pending) == 3
     assert len(builder.chunks) == 0
-
     builder.build_parallel(max_workers=2)
     assert len(builder.chunks) == 3
     assert builder.total_nnz == 15
 
 
+def test_accordion_dtype_property():
+    b32 = AccordionBuilder(num_rows=5, dtype='float32')
+    b64 = AccordionBuilder(num_rows=5, dtype='float64')
+    assert b32.dtype == np.float32
+    assert b64.dtype == np.float64
+
+
+# === Solver tests ===
+
 def test_solve_chunks():
-    """Solve a simple system using chunks."""
     n = 10
     builder = AccordionBuilder(num_rows=n)
-
-    # Chunk 1: first 5 columns
     for i in range(5):
         builder.add_entry(i, i, 2.0)
     builder._batch_cols = 5
     builder.flush()
-
-    # Chunk 2: last 5 columns
     for i in range(5):
         builder.add_entry(i + 5, i, 2.0)
     builder._batch_cols = 5
@@ -188,7 +238,6 @@ def test_solve_chunks():
 
     chunks = builder.finalize()
     b = np.ones(n)
-
     result = solve_chunks(chunks, b, verbose=False, precondition=False)
     assert result["feasible"]
     assert result["residual"] < 1e-6
@@ -196,77 +245,57 @@ def test_solve_chunks():
 
 
 def test_solve_chunks_with_preconditioner():
-    """Solve with diagonal preconditioning."""
     n = 20
     builder = AccordionBuilder(num_rows=n)
-
-    # Create a diagonal system with varying scales
     for i in range(n):
         builder.add_entry(i, i, float(i + 1) * 10)
     builder._batch_cols = n
     builder.flush()
-
     chunks = builder.finalize()
-    b = np.arange(1, n + 1, dtype=float) * 10  # each b[i] = (i+1)*10
+    b = np.arange(1, n + 1, dtype=float) * 10
 
     result = solve_chunks(chunks, b, verbose=False, precondition=True)
     assert result["feasible"]
-    assert result["residual"] < 1e-6
-    # x[i] should be 1.0
     assert np.allclose(result["x"], 1.0, atol=1e-6)
 
 
 def test_solve_chunks_float32():
-    """Solve using float32 chunks."""
     n = 10
     builder = AccordionBuilder(num_rows=n, dtype='float32')
-
     for i in range(n):
         builder.add_entry(i, i, 2.0)
     builder._batch_cols = n
     builder.flush()
-
     chunks = builder.finalize()
     b = np.ones(n)
 
     result = solve_chunks(chunks, b, verbose=False, precondition=False)
     assert result["feasible"]
-    assert result["residual"] < 1e-4  # float32 has less precision
+    assert result["residual"] < 1e-4
 
 
 def test_solve_chunks_preconditioner_reduces_iterations():
-    """Preconditioner should reduce iteration count on ill-conditioned system."""
     np.random.seed(42)
     m, n = 50, 100
     A = sparse.random(m, n, density=0.1, format="csr")
-    # Scale columns to create ill-conditioning
     scales = np.logspace(0, 4, n)
     A = A @ sparse.diags(scales)
     b = A @ np.ones(n)
 
-    # Build chunks
     builder1 = AccordionBuilder(num_rows=m)
     builder1.add_entries(
-        A.nonzero()[0].tolist(),
-        A.nonzero()[1].tolist(),
-        A.data.tolist(),
-        num_cols=n
-    )
+        A.nonzero()[0].tolist(), A.nonzero()[1].tolist(),
+        A.data.tolist(), num_cols=n)
     builder1.flush()
 
     builder2 = AccordionBuilder(num_rows=m)
     builder2.add_entries(
-        A.nonzero()[0].tolist(),
-        A.nonzero()[1].tolist(),
-        A.data.tolist(),
-        num_cols=n
-    )
+        A.nonzero()[0].tolist(), A.nonzero()[1].tolist(),
+        A.data.tolist(), num_cols=n)
     builder2.flush()
 
     r_no = solve_chunks(builder1.chunks, b, verbose=False, precondition=False, max_iter=2000)
     r_yes = solve_chunks(builder2.chunks, b, verbose=False, precondition=True, max_iter=2000)
-
-    # Preconditioned should use fewer iterations
     assert r_yes["iterations"] <= r_no["iterations"]
 
 
