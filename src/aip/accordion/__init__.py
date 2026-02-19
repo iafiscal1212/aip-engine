@@ -8,6 +8,7 @@ terabytes of RAM by:
   3. Solving with streaming LinearOperator over column chunks
 
 v0.4.0: Numba JIT acceleration, float32, preconditioner, parallel build.
+v0.4.1: Add union_sorted for Boolean IPS, improve build_axiom_entries col_offset.
 
 Example:
     from aip.accordion import PascalIndex, AccordionBuilder, solve_chunks

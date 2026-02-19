@@ -8,6 +8,8 @@ If numba is not installed, everything falls back to pure Python transparently.
 
 Install: pip install numba
 
+v0.4.1: Add union_sorted for Boolean IPS, improve build_axiom_entries col_offset.
+
 Author: Carmen Esteban
 """
 
@@ -132,14 +134,14 @@ def batch_combo_to_index_jit(combos_flat, starts, lengths, pascal, num_vars, off
 
 
 # ============================================================
-# Monomial product: merge two sorted combos
+# Monomial product: merge two sorted combos (general polynomials)
 # ============================================================
 
 @njit(cache=True)
 def merge_sorted(a, b):
-    """Merge two sorted arrays into one sorted array.
+    """Merge two sorted arrays into one sorted array (keeps duplicates).
 
-    This is the monomial product: x_i * x_j = sorted merge of indices.
+    This is the monomial product for general polynomials where x_i^2 != x_i.
 
     Parameters
     ----------
@@ -177,19 +179,74 @@ def merge_sorted(a, b):
 
 
 # ============================================================
-# Construction kernel: build sparse entries for one axiom batch
+# Monomial product: union of two sorted combos (Boolean / IPS)
+# ============================================================
+
+@njit(cache=True)
+def union_sorted(a, b):
+    """Sorted union of two sorted arrays (removes duplicates).
+
+    This is the monomial product for Boolean IPS where x_i^2 = x_i,
+    so the product of two multilinear monomials is the monomial with
+    the union of their variable sets.
+
+    Parameters
+    ----------
+    a, b : numpy arrays of int64
+        Sorted variable indices (no duplicates within each).
+
+    Returns
+    -------
+    numpy array of int64
+        Sorted union (no duplicates).
+    """
+    na = len(a)
+    nb = len(b)
+    out = np.empty(na + nb, dtype=np.int64)
+    i = 0
+    j = 0
+    k = 0
+    while i < na and j < nb:
+        if a[i] < b[j]:
+            out[k] = a[i]
+            i += 1
+            k += 1
+        elif a[i] > b[j]:
+            out[k] = b[j]
+            j += 1
+            k += 1
+        else:
+            out[k] = a[i]
+            i += 1
+            j += 1
+            k += 1
+    while i < na:
+        out[k] = a[i]
+        i += 1
+        k += 1
+    while j < nb:
+        out[k] = b[j]
+        j += 1
+        k += 1
+    return out[:k]
+
+
+# ============================================================
+# Construction kernel: build sparse entries for one axiom
 # ============================================================
 
 @njit(cache=True)
 def build_axiom_entries(
     axiom_flat, axiom_starts, axiom_lengths, axiom_coeffs,
     mono_flat, mono_starts, mono_lengths,
-    pascal, num_vars, offsets, max_degree, axiom_row_offset
+    pascal, num_vars, offsets, max_degree, col_offset
 ):
-    """Build sparse matrix entries for axiom × monomial products.
+    """Build sparse matrix entries for axiom x monomial products.
 
-    For each axiom term and each target monomial, computes the product
-    monomial index and generates (row, col, val) triples.
+    For each multiplier monomial m_j and each axiom term a_i, computes the
+    Boolean product (union of variables) and generates matrix entries:
+        row = PascalIndex of product monomial (equation index)
+        col = col_offset + j (unknown index)
 
     Parameters
     ----------
@@ -202,7 +259,7 @@ def build_axiom_entries(
     axiom_coeffs : 1D float array
         Coefficient of each axiom term.
     mono_flat : 1D array
-        All target monomial combos concatenated.
+        All multiplier monomial combos concatenated.
     mono_starts : 1D array
         Start of each monomial in mono_flat.
     mono_lengths : 1D array
@@ -212,17 +269,21 @@ def build_axiom_entries(
     num_vars : int
         Number of variables.
     offsets : 1D array
-        Degree offsets.
+        Degree offsets for PascalIndex.
     max_degree : int
         Maximum degree (products beyond this are skipped).
-    axiom_row_offset : int
-        Row offset for this axiom in the matrix.
+    col_offset : int
+        Column offset: columns are col_offset, col_offset+1, ...,
+        col_offset+n_monos-1.
 
     Returns
     -------
     rows : 1D int64 array
+        PascalIndex of each product monomial (matrix row).
     cols : 1D int64 array
+        col_offset + multiplier index (matrix column).
     vals : 1D float64 array
+        Axiom term coefficients.
     count : int
         Number of valid entries.
     """
@@ -236,31 +297,31 @@ def build_axiom_entries(
     vals = np.empty(max_entries, dtype=np.float64)
     count = 0
 
-    for i in range(n_axiom_terms):
-        a_start = axiom_starts[i]
-        a_len = axiom_lengths[i]
-        coeff = axiom_coeffs[i]
-        a_combo = axiom_flat[a_start:a_start + a_len]
+    for j in range(n_monos):
+        m_start = mono_starts[j]
+        m_len = mono_lengths[j]
+        m_combo = mono_flat[m_start:m_start + m_len]
 
-        for j in range(n_monos):
-            m_start = mono_starts[j]
-            m_len = mono_lengths[j]
+        for i in range(n_axiom_terms):
+            a_start = axiom_starts[i]
+            a_len = axiom_lengths[i]
+            coeff = axiom_coeffs[i]
+            a_combo = axiom_flat[a_start:a_start + a_len]
 
-            # Check if product degree exceeds max
-            prod_deg = a_len + m_len
-            if prod_deg > max_degree:
+            # Boolean product: union of variables (x_i^2 = x_i)
+            product = union_sorted(a_combo, m_combo)
+
+            # Check degree AFTER union (union can reduce degree vs merge)
+            if len(product) > max_degree:
                 continue
 
-            m_combo = mono_flat[m_start:m_start + m_len]
+            # PascalIndex of the product monomial -> matrix ROW
+            row_idx = offsets[len(product)] + _lex_rank_jit(
+                product, pascal, num_vars
+            )
 
-            # Merge sorted arrays (monomial product)
-            product = merge_sorted(a_combo, m_combo)
-
-            # Compute global index
-            col_idx = offsets[prod_deg] + _lex_rank_jit(product, pascal, num_vars)
-
-            rows[count] = j  # monomial row
-            cols[count] = col_idx
+            rows[count] = row_idx       # PascalIndex -> matrix row
+            cols[count] = col_offset + j # multiplier j -> matrix column
             vals[count] = coeff
             count += 1
 
@@ -334,3 +395,4 @@ def warmup(pascal, num_vars, offsets):
                               np.array([1], dtype=np.int64),
                               pascal, num_vars, offsets)
     merge_sorted(dummy, dummy)
+    union_sorted(dummy, dummy)
