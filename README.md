@@ -32,11 +32,11 @@ For systems with millions or billions of entries that don't fit in RAM:
 from aip.accordion import PascalIndex, AccordionBuilder, solve_chunks
 
 # 1. Mathematical indexing (replaces dictionary, saves GB of RAM)
-index = PascalIndex(num_vars=30, max_degree=10)
+index = PascalIndex(num_vars=20, max_degree=6)
 idx = index.combo_to_index((3, 7, 12))  # O(k) time, 0 extra memory
 
 # 2. Batch construction (never all in RAM at once)
-builder = AccordionBuilder(num_rows=53_000_000)
+builder = AccordionBuilder(num_rows=1_000_000)
 # ... add entries in batches ...
 builder.flush()  # converts to CSR chunk, frees raw data
 chunks = builder.finalize()
@@ -50,17 +50,17 @@ print(result['residual'], result['size_l2'])
 
 | | Without Accordion | With Accordion |
 |---|---|---|
-| Monomial index (8.6M entries) | ~2 GB dictionary | 0 MB (computed mathematically) |
-| Matrix construction (150M entries) | ~12 GB Python lists | ~2.4 GB array.array per batch |
-| Full matrix (53M x 1.17B) | 496,052 TB dense | 14.5 GB sparse chunks |
+| Monomial index (millions of entries) | ~2 GB dictionary | 0 MB (computed mathematically) |
+| Matrix construction (hundreds of millions) | ~12 GB Python lists | ~2.4 GB array.array per batch |
+| Full matrix (millions x billions) | petabytes dense | GB-scale sparse chunks |
 | Solve | needs full matrix in RAM | streaming over chunks |
 
 Real-world results:
 
 | Problem | Matrix size | Dense would be | Accordion uses | Compression |
 |---|---|---|---|---|
-| PHP n=4 d=8 | 8.6M x 78M | 5.4 PB | 1.2 GB | 4,640,586x |
-| PHP n=5 d=10 | 53M x 1.17B | 496,052 TB | 14.5 GB | 34,215,310x |
+| Large sparse system A | 8.6M x 78M | 5.4 PB | 1.2 GB | 4,640,586x |
+| Ultra-large sparse system B | 53M x 1.17B | 496,052 TB | 14.5 GB | 34,215,310x |
 
 ## How it works
 
@@ -69,9 +69,9 @@ Real-world results:
 Uses the [Combinatorial Number System](https://en.wikipedia.org/wiki/Combinatorial_number_system) to compute the index of any monomial in O(k) time using a precomputed Pascal table. No dictionary needed.
 
 ```python
-index = PascalIndex(num_vars=45, max_degree=10)
-print(index)  # PascalIndex(vars=45, deg=10, monomials=4,346,814,276, pascal=4048 bytes)
-# 4.3 billion monomials indexed with 4 KB of memory
+index = PascalIndex(num_vars=20, max_degree=6)
+print(index)  # PascalIndex(vars=20, deg=6, monomials=60,459, pascal=336 bytes)
+# 60K monomials indexed with 336 bytes of memory
 ```
 
 ### AccordionBuilder
