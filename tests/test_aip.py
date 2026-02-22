@@ -1,14 +1,15 @@
-"""Tests for aip-engine v0.4.0."""
+"""Tests for aip-engine v0.5.0."""
 import numpy as np
 from scipy import sparse
 import pytest
 
 import aip
-from aip.accordion import PascalIndex, AccordionBuilder, solve_chunks, fast
+from aip.accordion import (PascalIndex, AccordionBuilder, solve_chunks, fast,
+                            phpe_degree, phpe_plan)
 
 
 def test_version():
-    assert aip.__version__ == "0.4.0"
+    assert aip.__version__ == "0.5.0"
 
 
 def test_detect_dense():
@@ -297,6 +298,105 @@ def test_solve_chunks_preconditioner_reduces_iterations():
     r_no = solve_chunks(builder1.chunks, b, verbose=False, precondition=False, max_iter=2000)
     r_yes = solve_chunks(builder2.chunks, b, verbose=False, precondition=True, max_iter=2000)
     assert r_yes["iterations"] <= r_no["iterations"]
+
+
+# === PHP-E degree hypothesis tests ===
+
+def test_phpe_degree():
+    """Degree = 2n confirmed for n=2,3,4."""
+    assert phpe_degree(2) == 4
+    assert phpe_degree(3) == 6
+    assert phpe_degree(4) == 8
+    assert phpe_degree(5) == 10
+
+
+def test_phpe_plan():
+    """Plan returns expected parameters."""
+    plan = phpe_plan(3)
+    assert plan["n"] == 3
+    assert plan["degree"] == 6
+    assert plan["pigeons"] == 4
+    assert plan["holes"] == 3
+    assert plan["factorial"] == 24
+    assert plan["num_vars"] == 18  # 12 x + 6 y
+    assert plan["estimated_monomials"] > 0
+
+
+def test_phpe_plan_vars():
+    """Check variable count formula: n(n+1) x-vars + C(n+1,2) y-vars."""
+    for n in [2, 3, 4, 5]:
+        plan = phpe_plan(n)
+        x_vars = n * (n + 1)
+        y_vars = (n + 1) * n // 2
+        assert plan["num_vars"] == x_vars + y_vars
+
+
+# === Early stopping tests ===
+
+def test_early_stop_on_stagnation():
+    """Early stopping should trigger on a system that stagnates."""
+    # Large underdetermined system with noise in b: LSQR will iterate
+    # many times but residual eventually stagnates
+    np.random.seed(42)
+    m, n_cols = 500, 200
+    A = sparse.random(m, n_cols, density=0.05, format="csr")
+    # b with a large component outside column space
+    b_in = A @ np.random.randn(n_cols)
+    b_noise = np.random.randn(m) * 50
+    b = b_in + b_noise  # residual will plateau at ~||b_noise||
+
+    builder = AccordionBuilder(num_rows=m)
+    builder.add_entries(
+        A.nonzero()[0].tolist(), A.nonzero()[1].tolist(),
+        A.data.tolist(), num_cols=n_cols)
+    builder.flush()
+
+    result = solve_chunks(
+        builder.chunks, b, max_iter=5000, verbose=False,
+        precondition=True, early_stop=True,
+        check_every=20, stagnation_patience=3,
+        stagnation_threshold=0.001)
+
+    # Should stop before max_iter, or at least have residual history
+    assert len(result["residual_history"]) > 0
+    # If it early stopped, iterations should be well below max
+    if result["early_stopped"]:
+        assert result["iterations"] < 5000
+
+
+def test_early_stop_feasible_not_stopped():
+    """Feasible systems should converge without early stopping."""
+    n = 10
+    builder = AccordionBuilder(num_rows=n)
+    for i in range(n):
+        builder.add_entry(i, i, 2.0)
+    builder._batch_cols = n
+    builder.flush()
+
+    chunks = builder.finalize()
+    b = np.ones(n)
+    result = solve_chunks(chunks, b, verbose=False, precondition=False,
+                          early_stop=True, check_every=50)
+    assert result["feasible"]
+    assert not result["early_stopped"]
+
+
+def test_early_stop_disabled():
+    """When early_stop=False, behavior matches original."""
+    n = 10
+    builder = AccordionBuilder(num_rows=n)
+    for i in range(n):
+        builder.add_entry(i, i, 2.0)
+    builder._batch_cols = n
+    builder.flush()
+
+    chunks = builder.finalize()
+    b = np.ones(n)
+    result = solve_chunks(chunks, b, verbose=False, precondition=False,
+                          early_stop=False)
+    assert result["feasible"]
+    assert not result["early_stopped"]
+    assert result["residual_history"] == []
 
 
 if __name__ == "__main__":

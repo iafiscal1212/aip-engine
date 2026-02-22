@@ -24,7 +24,7 @@ Author: Carmen Esteban
 License: MIT
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __author__ = "Carmen Esteban"
 
 from aip.detector import detect_matrix

@@ -32,9 +32,9 @@ Author: Carmen Esteban
 from aip.accordion import fast
 from aip.accordion.indexing import PascalIndex
 from aip.accordion.builder import AccordionBuilder
-from aip.accordion.solver import solve_chunks, accordion_info
+from aip.accordion.solver import solve_chunks, accordion_info, phpe_degree, phpe_plan
 
 __all__ = [
     "PascalIndex", "AccordionBuilder", "solve_chunks", "accordion_info",
-    "fast",
+    "phpe_degree", "phpe_plan", "fast",
 ]

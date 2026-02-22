@@ -6,6 +6,7 @@ that performs matvec/rmatvec by iterating over CSR column-chunks.
 This allows solving systems with billions of unknowns.
 
 v0.4.0: Added diagonal (Jacobi) preconditioning and float32 support.
+v0.5.0: Early stopping on residual stagnation. phpe_degree(n) helper.
 
 Author: Carmen Esteban
 """
@@ -14,6 +15,65 @@ import numpy as np
 from scipy.sparse.linalg import lsqr, LinearOperator
 import time
 import sys
+
+
+# ══════════════════════════════════════════════════════════════
+# PHP-E degree hypothesis: minimum feasible degree = 2n
+# ══════════════════════════════════════════════════════════════
+
+def phpe_degree(n):
+    """
+    Minimum IPS degree for PHP-Entangled with n holes.
+
+    Based on the 2n hypothesis confirmed computationally:
+      n=2 -> d=4  (FEASIBLE, CONFIRMED)
+      n=3 -> d=6  (FEASIBLE, CONFIRMED)
+      n=4 -> d=8  (FEASIBLE, CONFIRMED)
+
+    Parameters
+    ----------
+    n : int
+        Number of holes (pigeons = n+1).
+
+    Returns
+    -------
+    int
+        Predicted minimum degree = 2*n.
+    """
+    return 2 * n
+
+
+def phpe_plan(n):
+    """
+    Compute expected dimensions for PHP-E at degree 2n.
+
+    Returns a dict with predicted parameters so you can estimate
+    memory and time before launching the computation.
+
+    Parameters
+    ----------
+    n : int
+        Number of holes.
+
+    Returns
+    -------
+    dict
+        Predicted parameters: degree, num_vars, num_pigeons, factorial,
+        estimated_monomials.
+    """
+    from math import comb, factorial
+    d = 2 * n
+    num_vars = n * (n + 1) + (n + 1) * n // 2  # x vars + y vars
+    monomials = sum(comb(num_vars, k) for k in range(d + 1))
+    return {
+        "n": n,
+        "degree": d,
+        "num_vars": num_vars,
+        "pigeons": n + 1,
+        "holes": n,
+        "factorial": factorial(n + 1),
+        "estimated_monomials": monomials,
+    }
 
 
 def accordion_info(chunks):
@@ -60,8 +120,24 @@ def _compute_col_norms(chunks):
     return np.concatenate(norms)
 
 
+def _compute_residual(chunks, x, b):
+    """Compute ||Ax - b|| streaming over chunks. Always float64."""
+    m = b.shape[0]
+    Ax = np.zeros(m, dtype=np.float64)
+    offset = 0
+    for chunk in chunks:
+        cols = chunk.shape[1]
+        Ax += chunk @ x[offset:offset + cols]
+        offset += cols
+    residual = float(np.linalg.norm(Ax - b))
+    del Ax
+    return residual
+
+
 def solve_chunks(chunks, b, max_iter=5000, tol=1e-10, verbose=True,
-                 precondition=True, dtype=None):
+                 precondition=True, dtype=None, early_stop=True,
+                 check_every=200, stagnation_patience=3,
+                 stagnation_threshold=0.001):
     """
     Solve Ax = b where A is represented as column chunks.
 
@@ -86,11 +162,24 @@ def solve_chunks(chunks, b, max_iter=5000, tol=1e-10, verbose=True,
     dtype : numpy dtype, optional
         Force float32 or float64 for internal vectors. If None, uses
         the dtype of the first chunk.
+    early_stop : bool
+        Enable early stopping when residual stagnates. Default True.
+        When the relative improvement between checks is below
+        stagnation_threshold for stagnation_patience consecutive checks,
+        LSQR stops early.
+    check_every : int
+        Check residual every N iterations for early stopping. Default 200.
+    stagnation_patience : int
+        Number of consecutive stagnant checks before stopping. Default 3.
+    stagnation_threshold : float
+        Minimum relative improvement to not be considered stagnant.
+        Default 0.001 (0.1% improvement).
 
     Returns
     -------
     dict
-        Solution with keys: x, residual, size_l2, iterations, feasible, time.
+        Solution with keys: x, residual, size_l2, iterations, feasible,
+        time, early_stopped, residual_history.
     """
     if not chunks:
         raise ValueError("No chunks provided")
@@ -149,14 +238,86 @@ def solve_chunks(chunks, b, max_iter=5000, tol=1e-10, verbose=True,
         return result.astype(np.float64)  # LSQR needs float64
 
     op = LinearOperator((m, n), matvec=matvec, rmatvec=rmatvec, dtype=np.float64)
+    b64 = b.astype(np.float64)
 
     if verbose:
-        print(f"  [Accordion] LSQR max_iter={max_iter}, precond={'ON' if precondition else 'OFF'}...")
+        es_label = f", early_stop=ON (check={check_every}, patience={stagnation_patience})" if early_stop else ""
+        print(f"  [Accordion] LSQR max_iter={max_iter}, precond={'ON' if precondition else 'OFF'}{es_label}...")
         sys.stdout.flush()
 
     t0 = time.time()
-    result = lsqr(op, b.astype(np.float64), atol=tol, btol=tol, iter_lim=max_iter)
-    x_raw = result[0]
+    total_iters = 0
+    x_raw = np.zeros(n, dtype=np.float64)
+    early_stopped = False
+    residual_history = []
+    stagnant_count = 0
+
+    if early_stop and max_iter > check_every:
+        # Run LSQR in segments, checking residual between segments
+        remaining = max_iter
+        while remaining > 0:
+            segment = min(check_every, remaining)
+            result = lsqr(op, b64, x0=x_raw, atol=tol, btol=tol, iter_lim=segment)
+            x_raw = result[0]
+            total_iters += result[2]
+            remaining -= segment
+
+            # Check if LSQR converged internally (istop 1 or 2)
+            if result[1] in (1, 2):
+                if verbose:
+                    print(f"  [Accordion] LSQR converged at iter {total_iters} (istop={result[1]})")
+                    sys.stdout.flush()
+                break
+
+            # Compute actual residual for stagnation check
+            if diag_inv is not None:
+                x_check = x_raw * diag_inv.astype(np.float64)
+            else:
+                x_check = x_raw
+            res_now = _compute_residual(chunks, x_check, b64)
+            residual_history.append((total_iters, res_now))
+
+            if verbose:
+                elapsed_now = time.time() - t0
+                print(f"  [Accordion] iter {total_iters}: res={res_now:.2e} [{elapsed_now:.0f}s]")
+                sys.stdout.flush()
+
+            # Already feasible?
+            if res_now < 1e-6:
+                if verbose:
+                    print(f"  [Accordion] FEASIBLE at iter {total_iters}!")
+                    sys.stdout.flush()
+                break
+
+            # Check stagnation
+            if len(residual_history) >= 2:
+                prev_res = residual_history[-2][1]
+                if prev_res > 0:
+                    improvement = (prev_res - res_now) / prev_res
+                else:
+                    improvement = 0.0
+
+                if improvement < stagnation_threshold:
+                    stagnant_count += 1
+                    if verbose and stagnant_count > 0:
+                        print(f"  [Accordion] Stagnant ({stagnant_count}/{stagnation_patience}): "
+                              f"improvement={improvement:.4f} < {stagnation_threshold}")
+                        sys.stdout.flush()
+                    if stagnant_count >= stagnation_patience:
+                        early_stopped = True
+                        if verbose:
+                            print(f"  [Accordion] EARLY STOP: residual stagnated at {res_now:.2e} "
+                                  f"after {total_iters} iters")
+                            sys.stdout.flush()
+                        break
+                else:
+                    stagnant_count = 0
+    else:
+        # Original behavior: single LSQR call
+        result = lsqr(op, b64, atol=tol, btol=tol, iter_lim=max_iter)
+        x_raw = result[0]
+        total_iters = result[2]
+
     elapsed = time.time() - t0
 
     # Undo preconditioning to get real x
@@ -165,30 +326,26 @@ def solve_chunks(chunks, b, max_iter=5000, tol=1e-10, verbose=True,
     else:
         x = x_raw
 
-    # Compute residual (always in float64 for accuracy)
-    offset = 0
-    Ax = np.zeros(m, dtype=np.float64)
-    for chunk in chunks:
-        cols = chunk.shape[1]
-        Ax += chunk @ x[offset:offset + cols]
-        offset += cols
-    residual = float(np.linalg.norm(Ax - b))
-    del Ax
+    # Compute final residual (always in float64 for accuracy)
+    residual = _compute_residual(chunks, x, b64)
 
     size_l2 = int(np.sum(np.abs(x) > 1e-8))
     feasible = residual < 1e-6
 
     if verbose:
         status = "FEASIBLE" if feasible else "INFEASIBLE"
-        print(f"  [Accordion] res={residual:.2e}, iters={result[2]}, "
-              f"SIZE_L2={size_l2:,}, {status} [{elapsed:.1f}s]")
+        es_tag = " [EARLY_STOP]" if early_stopped else ""
+        print(f"  [Accordion] res={residual:.2e}, iters={total_iters}, "
+              f"SIZE_L2={size_l2:,}, {status}{es_tag} [{elapsed:.1f}s]")
         sys.stdout.flush()
 
     return {
         "x": x,
         "residual": residual,
         "size_l2": size_l2,
-        "iterations": result[2],
+        "iterations": total_iters,
         "feasible": feasible,
         "time": elapsed,
+        "early_stopped": early_stopped,
+        "residual_history": residual_history,
     }
