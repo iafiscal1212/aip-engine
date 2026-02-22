@@ -6,7 +6,7 @@ that performs matvec/rmatvec by iterating over CSR column-chunks.
 This allows solving systems with billions of unknowns.
 
 v0.4.0: Added diagonal (Jacobi) preconditioning and float32 support.
-v0.5.0: Early stopping on residual stagnation. phpe_degree(n) helper.
+v0.5.0: Early stopping on residual stagnation.
 
 Author: Carmen Esteban
 """
@@ -15,65 +15,6 @@ import numpy as np
 from scipy.sparse.linalg import lsqr, LinearOperator
 import time
 import sys
-
-
-# ══════════════════════════════════════════════════════════════
-# PHP-E degree hypothesis: minimum feasible degree = 2n
-# ══════════════════════════════════════════════════════════════
-
-def phpe_degree(n):
-    """
-    Minimum IPS degree for PHP-Entangled with n holes.
-
-    Based on the 2n hypothesis confirmed computationally:
-      n=2 -> d=4  (FEASIBLE, CONFIRMED)
-      n=3 -> d=6  (FEASIBLE, CONFIRMED)
-      n=4 -> d=8  (FEASIBLE, CONFIRMED)
-
-    Parameters
-    ----------
-    n : int
-        Number of holes (pigeons = n+1).
-
-    Returns
-    -------
-    int
-        Predicted minimum degree = 2*n.
-    """
-    return 2 * n
-
-
-def phpe_plan(n):
-    """
-    Compute expected dimensions for PHP-E at degree 2n.
-
-    Returns a dict with predicted parameters so you can estimate
-    memory and time before launching the computation.
-
-    Parameters
-    ----------
-    n : int
-        Number of holes.
-
-    Returns
-    -------
-    dict
-        Predicted parameters: degree, num_vars, num_pigeons, factorial,
-        estimated_monomials.
-    """
-    from math import comb, factorial
-    d = 2 * n
-    num_vars = n * (n + 1) + (n + 1) * n // 2  # x vars + y vars
-    monomials = sum(comb(num_vars, k) for k in range(d + 1))
-    return {
-        "n": n,
-        "degree": d,
-        "num_vars": num_vars,
-        "pigeons": n + 1,
-        "holes": n,
-        "factorial": factorial(n + 1),
-        "estimated_monomials": monomials,
-    }
 
 
 def accordion_info(chunks):

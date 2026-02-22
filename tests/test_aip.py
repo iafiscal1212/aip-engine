@@ -4,8 +4,7 @@ from scipy import sparse
 import pytest
 
 import aip
-from aip.accordion import (PascalIndex, AccordionBuilder, solve_chunks, fast,
-                            phpe_degree, phpe_plan)
+from aip.accordion import PascalIndex, AccordionBuilder, solve_chunks, fast
 
 
 def test_version():
@@ -298,37 +297,6 @@ def test_solve_chunks_preconditioner_reduces_iterations():
     r_no = solve_chunks(builder1.chunks, b, verbose=False, precondition=False, max_iter=2000)
     r_yes = solve_chunks(builder2.chunks, b, verbose=False, precondition=True, max_iter=2000)
     assert r_yes["iterations"] <= r_no["iterations"]
-
-
-# === PHP-E degree hypothesis tests ===
-
-def test_phpe_degree():
-    """Degree = 2n confirmed for n=2,3,4."""
-    assert phpe_degree(2) == 4
-    assert phpe_degree(3) == 6
-    assert phpe_degree(4) == 8
-    assert phpe_degree(5) == 10
-
-
-def test_phpe_plan():
-    """Plan returns expected parameters."""
-    plan = phpe_plan(3)
-    assert plan["n"] == 3
-    assert plan["degree"] == 6
-    assert plan["pigeons"] == 4
-    assert plan["holes"] == 3
-    assert plan["factorial"] == 24
-    assert plan["num_vars"] == 18  # 12 x + 6 y
-    assert plan["estimated_monomials"] > 0
-
-
-def test_phpe_plan_vars():
-    """Check variable count formula: n(n+1) x-vars + C(n+1,2) y-vars."""
-    for n in [2, 3, 4, 5]:
-        plan = phpe_plan(n)
-        x_vars = n * (n + 1)
-        y_vars = (n + 1) * n // 2
-        assert plan["num_vars"] == x_vars + y_vars
 
 
 # === Early stopping tests ===
