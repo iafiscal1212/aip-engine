@@ -30,5 +30,7 @@ __author__ = "Carmen Esteban"
 from aip.detector import detect_matrix
 from aip.solver import solve
 from aip import accordion
+from aip.colgen_solver import ColumnGenSolver, solve_phpe_colgen
 
-__all__ = ["detect_matrix", "solve", "accordion"]
+__all__ = ["detect_matrix", "solve", "accordion",
+           "ColumnGenSolver", "solve_phpe_colgen"]
